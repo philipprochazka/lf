@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -89,10 +90,7 @@ func (e *setExpr) eval(app *app, args []string) {
 			app.ui.renew()
 			if app.nav.height != app.ui.wins[0].h {
 				app.nav.height = app.ui.wins[0].h
-				app.nav.regCache = make(map[string]*reg)
-				if gOpts.sixel {
-					app.ui.sxScreen.lastFile = ""
-				}
+				clear(app.nav.regCache)
 			}
 			app.ui.loadFile(app, true)
 		}
@@ -156,6 +154,9 @@ func (e *setExpr) eval(app *app, args []string) {
 			err = errors.New("preview: 'ratios' should consist of at least two numbers before enabling 'preview'")
 		}
 		if err == nil {
+			if gOpts.sixel {
+				app.ui.sxScreen.forceClear = true
+			}
 			gOpts.preview = preview
 			app.ui.loadFile(app, true)
 		}
@@ -169,8 +170,13 @@ func (e *setExpr) eval(app *app, args []string) {
 		}
 	case "roundbox", "noroundbox", "roundbox!":
 		err = applyBoolOpt(&gOpts.roundbox, e)
+	case "showbinds", "noshowbinds", "showbinds!":
+		err = applyBoolOpt(&gOpts.showbinds, e)
 	case "sixel", "nosixel", "sixel!":
 		err = applyBoolOpt(&gOpts.sixel, e)
+		clear(app.nav.regCache)
+		app.ui.sxScreen.forceClear = true
+		app.ui.loadFile(app, true)
 	case "smartcase", "nosmartcase", "smartcase!":
 		err = applyBoolOpt(&gOpts.smartcase, e)
 		if err == nil {
@@ -192,7 +198,9 @@ func (e *setExpr) eval(app *app, args []string) {
 		if err == nil {
 			if gOpts.watch {
 				app.watch.start()
-				app.setWatchPaths()
+				for _, dir := range app.nav.dirCache {
+					app.watchDir(dir)
+				}
 			} else {
 				app.watch.stop()
 			}
@@ -260,13 +268,24 @@ func (e *setExpr) eval(app *app, args []string) {
 		toks := strings.Split(e.val, ":")
 		for _, s := range toks {
 			switch s {
-			case "size", "time", "atime", "ctime":
+			case "size", "time", "atime", "ctime", "perm", "user", "group":
 			default:
-				app.ui.echoerr("info: should consist of 'size', 'time', 'atime' or 'ctime' separated with colon")
+				app.ui.echoerr("info: should consist of 'size', 'time', 'atime', 'ctime', 'perm', 'user' or 'group' separated with colon")
 				return
 			}
 		}
 		gOpts.info = toks
+	case "locale":
+		localeStr := e.val
+		if localeStr != localeStrDisable {
+			if _, err = getLocaleTag(localeStr); err != nil {
+				app.ui.echoerrf("locale: %s", err.Error())
+				return
+			}
+		}
+		gOpts.locale = localeStr
+		app.nav.sort()
+		app.ui.sort()
 	case "rulerfmt":
 		gOpts.rulerfmt = e.val
 	case "preserve":
@@ -313,7 +332,7 @@ func (e *setExpr) eval(app *app, args []string) {
 		gOpts.promptfmt = e.val
 	case "ratios":
 		toks := strings.Split(e.val, ":")
-		var rats []int
+		rats := make([]int, 0, len(toks))
 		for _, s := range toks {
 			n, err := strconv.Atoi(s)
 			if err != nil {
@@ -333,8 +352,7 @@ func (e *setExpr) eval(app *app, args []string) {
 		gOpts.ratios = rats
 		app.ui.wins = getWins(app.ui.screen)
 		if gOpts.sixel {
-			app.nav.regCache = make(map[string]*reg)
-			app.ui.sxScreen.lastFile = ""
+			clear(app.nav.regCache)
 		}
 		app.ui.loadFile(app, true)
 	case "scrolloff":
@@ -446,14 +464,16 @@ func (e *setLocalExpr) eval(app *app, args []string) {
 
 	var err error
 	switch e.opt {
+	case "dircounts", "nodircounts", "dircounts!":
+		err = applyLocalBoolOpt(gLocalOpts.dircounts, gOpts.dircounts, e)
 	case "dirfirst", "nodirfirst", "dirfirst!":
-		err = applyLocalBoolOpt(gLocalOpts.dirfirsts, gOpts.dirfirst, e)
+		err = applyLocalBoolOpt(gLocalOpts.dirfirst, gOpts.dirfirst, e)
 		if err == nil {
 			app.nav.sort()
 			app.ui.sort()
 		}
 	case "dironly", "nodironly", "dironly!":
-		err = applyLocalBoolOpt(gLocalOpts.dironlys, gOpts.dironly, e)
+		err = applyLocalBoolOpt(gLocalOpts.dironly, gOpts.dironly, e)
 		if err == nil {
 			app.nav.sort()
 			app.nav.position()
@@ -461,7 +481,7 @@ func (e *setLocalExpr) eval(app *app, args []string) {
 			app.ui.loadFile(app, true)
 		}
 	case "hidden", "nohidden", "hidden!":
-		err = applyLocalBoolOpt(gLocalOpts.hiddens, gOpts.hidden, e)
+		err = applyLocalBoolOpt(gLocalOpts.hidden, gOpts.hidden, e)
 		if err == nil {
 			app.nav.sort()
 			app.nav.position()
@@ -469,33 +489,44 @@ func (e *setLocalExpr) eval(app *app, args []string) {
 			app.ui.loadFile(app, true)
 		}
 	case "reverse", "noreverse", "reverse!":
-		err = applyLocalBoolOpt(gLocalOpts.reverses, gOpts.reverse, e)
+		err = applyLocalBoolOpt(gLocalOpts.reverse, gOpts.reverse, e)
 		if err == nil {
 			app.nav.sort()
 			app.ui.sort()
 		}
 	case "info":
 		if e.val == "" {
-			gLocalOpts.infos[e.path] = nil
+			gLocalOpts.info[e.path] = nil
 			return
 		}
 		toks := strings.Split(e.val, ":")
 		for _, s := range toks {
 			switch s {
-			case "size", "time", "atime", "ctime":
+			case "size", "time", "atime", "ctime", "perm", "user", "group":
 			default:
-				app.ui.echoerr("info: should consist of 'size', 'time', 'atime' or 'ctime' separated with colon")
+				app.ui.echoerr("info: should consist of 'size', 'time', 'atime', 'ctime', 'perm', 'user' or 'group' separated with colon")
 				return
 			}
 		}
-		gLocalOpts.infos[e.path] = toks
+		gLocalOpts.info[e.path] = toks
 	case "sortby":
 		method := sortMethod(e.val)
 		if !isValidSortMethod(method) {
 			app.ui.echoerr(invalidSortErrorMessage)
 			return
 		}
-		gLocalOpts.sortbys[e.path] = method
+		gLocalOpts.sortby[e.path] = method
+		app.nav.sort()
+		app.ui.sort()
+	case "locale":
+		localeStr := e.val
+		if localeStr != localeStrDisable {
+			if _, err = getLocaleTag(localeStr); err != nil {
+				app.ui.echoerrf("locale: %s", err.Error())
+				return
+			}
+		}
+		gLocalOpts.locale[e.path] = localeStr
 		app.nav.sort()
 		app.ui.sort()
 	default:
@@ -557,7 +588,6 @@ func preChdir(app *app) {
 
 func onChdir(app *app) {
 	app.nav.addJumpList()
-	app.setWatchPaths()
 	if cmd, ok := gOpts.cmds["on-cd"]; ok {
 		cmd.eval(app, nil)
 	}
@@ -571,6 +601,12 @@ func onFocusGained(app *app) {
 
 func onFocusLost(app *app) {
 	if cmd, ok := gOpts.cmds["on-focus-lost"]; ok {
+		cmd.eval(app, nil)
+	}
+}
+
+func onInit(app *app) {
+	if cmd, ok := gOpts.cmds["on-init"]; ok {
 		cmd.eval(app, nil)
 	}
 }
@@ -657,11 +693,11 @@ func menuComplete(app *app, dir int) {
 		ind := len(app.ui.cmdTmp) - len([]rune(last))
 		app.ui.cmdAccLeft = append(app.ui.cmdTmp[:ind], []rune(comp)...)
 	}
-	app.ui.menuBuf = listMatches(app.ui.screen, app.menuComps, app.menuCompInd)
+	app.ui.menu = listMatches(app.ui.screen, app.menuComps, app.menuCompInd)
 }
 
 func update(app *app) {
-	app.ui.menuBuf = nil
+	app.ui.menu = ""
 	app.menuCompActive = false
 
 	switch {
@@ -752,7 +788,7 @@ func normal(app *app) {
 	app.cmdHistoryInd = 0
 	app.menuCompActive = false
 
-	app.ui.menuBuf = nil
+	app.ui.menu = ""
 	app.ui.cmdAccLeft = nil
 	app.ui.cmdAccRight = nil
 	app.ui.cmdPrefix = ""
@@ -961,7 +997,7 @@ func insert(app *app, arg string) {
 		}
 		fallthrough
 	default:
-		app.ui.menuBuf = nil
+		app.ui.menu = ""
 		app.menuCompActive = false
 		app.ui.cmdAccLeft = append(app.ui.cmdAccLeft, []rune(arg)...)
 	}
@@ -1027,6 +1063,19 @@ func (e *callExpr) eval(app *app, args []string) {
 			app.ui.loadFile(app, true)
 			app.ui.loadFileInfo(app.nav)
 		}
+	case "tty-write":
+		if len(e.args) != 1 {
+			app.ui.echoerr("tty-write: requires an argument")
+			return
+		}
+
+		tty, ok := app.ui.screen.Tty()
+		if !ok {
+			log.Printf("tty-write: failed to get tty")
+			return
+		}
+
+		tty.Write([]byte(e.args[0]))
 	case "scroll-down":
 		if !app.nav.init {
 			return
@@ -1041,7 +1090,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		}
 		resetIncCmd(app)
 		preChdir(app)
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			if err := app.nav.updir(); err != nil {
 				app.ui.echoerrf("%s", err)
 				return
@@ -1082,13 +1131,15 @@ func (e *callExpr) eval(app *app, args []string) {
 			return
 		}
 
+		app.ui.loadFileInfo(app.nav)
+
 		if cmd, ok := gOpts.cmds["open"]; ok {
 			cmd.eval(app, e.args)
 		}
 	case "jump-prev":
 		resetIncCmd(app)
 		preChdir(app)
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			app.nav.cdJumpListPrev()
 		}
 		app.ui.loadFile(app, true)
@@ -1098,7 +1149,7 @@ func (e *callExpr) eval(app *app, args []string) {
 	case "jump-next":
 		resetIncCmd(app)
 		preChdir(app)
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			app.nav.cdJumpListNext()
 		}
 		app.ui.loadFile(app, true)
@@ -1257,7 +1308,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		app.ui.sort()
 	case "clearmaps":
 		// leave `:` and cmaps bound so the user can still exit using `:quit`
-		gOpts.keys = make(map[string]expr)
+		clear(gOpts.keys)
 		gOpts.keys[":"] = &callExpr{"read", nil, 1}
 	case "copy":
 		if !app.nav.init {
@@ -1380,11 +1431,11 @@ func (e *callExpr) eval(app *app, args []string) {
 		app.ui.screen.Sync()
 		if app.nav.height != app.ui.wins[0].h {
 			app.nav.height = app.ui.wins[0].h
-			app.nav.regCache = make(map[string]*reg)
+			clear(app.nav.regCache)
 		}
 		if gOpts.sixel {
-			app.nav.regCache = make(map[string]*reg)
-			app.ui.sxScreen.lastFile = ""
+			clear(app.nav.regCache)
+			app.ui.sxScreen.forceClear = true
 		}
 		for _, dir := range app.nav.dirs {
 			dir.boundPos(app.nav.height)
@@ -1463,7 +1514,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		}
 		dir := app.nav.currDir()
 		old := dir.ind
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			if app.nav.findBack {
 				app.nav.findPrev()
 			} else {
@@ -1480,7 +1531,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		}
 		dir := app.nav.currDir()
 		old := dir.ind
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			if app.nav.findBack {
 				app.nav.findNext()
 			} else {
@@ -1523,7 +1574,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		if !app.nav.init {
 			return
 		}
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			if app.nav.searchBack {
 				if moved, err := app.nav.searchPrev(); err != nil {
 					app.ui.echoerrf("search-back: %s: %s", err, app.nav.search)
@@ -1544,7 +1595,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		if !app.nav.init {
 			return
 		}
-		for i := 0; i < e.count; i++ {
+		for range e.count {
 			if app.nav.searchBack {
 				if moved, err := app.nav.searchNext(); err != nil {
 					app.ui.echoerrf("search-back: %s: %s", err, app.nav.search)
@@ -1599,14 +1650,14 @@ func (e *callExpr) eval(app *app, args []string) {
 			return
 		}
 		normal(app)
-		app.ui.menuBuf = listMarks(app.nav.marks)
+		app.ui.menu = listMarks(app.nav.marks)
 		app.ui.cmdPrefix = "mark-load: "
 	case "mark-remove":
 		if app.ui.cmdPrefix == ">" {
 			return
 		}
 		normal(app)
-		app.ui.menuBuf = listMarks(app.nav.marks)
+		app.ui.menu = listMarks(app.nav.marks)
 		app.ui.cmdPrefix = "mark-remove: "
 	case "rename":
 		if !app.nav.init {
@@ -1774,6 +1825,8 @@ func (e *callExpr) eval(app *app, args []string) {
 		onFocusGained(app)
 	case "on-focus-lost":
 		onFocusLost(app)
+	case "on-init":
+		onInit(app)
 	case "cmd-insert":
 		if len(e.args) == 0 {
 			return
@@ -1786,13 +1839,13 @@ func (e *callExpr) eval(app *app, args []string) {
 		normal(app)
 	case "cmd-complete":
 		matches := doComplete(app)
-		app.ui.menuBuf = listMatches(app.ui.screen, matches, -1)
+		app.ui.menu = listMatches(app.ui.screen, matches, -1)
 	case "cmd-menu-complete":
 		menuComplete(app, 1)
 	case "cmd-menu-complete-back":
 		menuComplete(app, -1)
 	case "cmd-menu-accept":
-		app.ui.menuBuf = nil
+		app.ui.menu = ""
 		app.menuCompActive = false
 	case "cmd-enter":
 		s := string(append(app.ui.cmdAccLeft, app.ui.cmdAccRight...))
@@ -1800,7 +1853,7 @@ func (e *callExpr) eval(app *app, args []string) {
 			return
 		}
 
-		app.ui.menuBuf = nil
+		app.ui.menu = ""
 		app.menuCompActive = false
 
 		app.ui.cmdAccLeft = nil
@@ -1956,7 +2009,7 @@ func (e *callExpr) eval(app *app, args []string) {
 			log.Printf("entering unknown execution prefix: %q", app.ui.cmdPrefix)
 		}
 	case "cmd-history-next":
-		if app.ui.cmdPrefix == "" || app.ui.cmdPrefix == ">" {
+		if !slices.Contains([]string{":", "$", "!", "%", "&"}, app.ui.cmdPrefix) {
 			return
 		}
 		if app.cmdHistoryInd > 0 {
@@ -1974,7 +2027,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		app.ui.cmdPrefix = cmd.prefix
 		app.ui.cmdAccLeft = []rune(cmd.value)
 	case "cmd-history-prev":
-		if app.ui.cmdPrefix == ">" {
+		if !slices.Contains([]string{":", "$", "!", "%", "&", ""}, app.ui.cmdPrefix) {
 			return
 		}
 		if app.cmdHistoryInd == len(app.cmdHistory) {
@@ -2085,8 +2138,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		}
 		ind := locs[len(locs)-1][3]
 		old := app.ui.cmdAccRight
-		app.ui.cmdAccRight = append([]rune{}, []rune(string(app.ui.cmdAccLeft)[ind:])...)
-		app.ui.cmdAccRight = append(app.ui.cmdAccRight, old...)
+		app.ui.cmdAccRight = append([]rune(string(app.ui.cmdAccLeft)[ind:]), old...)
 		app.ui.cmdAccLeft = []rune(string(app.ui.cmdAccLeft)[:ind])
 	case "cmd-capitalize-word":
 		if len(app.ui.cmdAccRight) == 0 {
@@ -2129,7 +2181,7 @@ func (e *callExpr) eval(app *app, args []string) {
 		}
 		ind := locs[len(locs)-1][3]
 		app.ui.cmdYankBuf = []rune(string(app.ui.cmdAccLeft)[ind:])
-		app.ui.cmdAccLeft = app.ui.cmdAccLeft[:ind]
+		app.ui.cmdAccLeft = []rune(string(app.ui.cmdAccLeft)[:ind])
 		update(app)
 	case "cmd-uppercase-word":
 		if len(app.ui.cmdAccRight) == 0 {
@@ -2179,15 +2231,13 @@ func (e *callExpr) eval(app *app, args []string) {
 		beg1, end1 := locs[len(locs)-2][0], locs[len(locs)-2][1]
 		beg2, end2 := locs[len(locs)-1][0], locs[len(locs)-1][1]
 
-		var acc []rune
-
-		acc = append(acc, []rune(string(app.ui.cmdAccLeft)[:beg1])...)
-		acc = append(acc, []rune(string(app.ui.cmdAccLeft)[beg2:end2])...)
-		acc = append(acc, []rune(string(app.ui.cmdAccLeft)[end1:beg2])...)
-		acc = append(acc, []rune(string(app.ui.cmdAccLeft)[beg1:end1])...)
-		acc = append(acc, []rune(string(app.ui.cmdAccLeft)[end2:])...)
-
-		app.ui.cmdAccLeft = acc
+		app.ui.cmdAccLeft = slices.Concat(
+			[]rune(string(app.ui.cmdAccLeft)[:beg1]),
+			[]rune(string(app.ui.cmdAccLeft)[beg2:end2]),
+			[]rune(string(app.ui.cmdAccLeft)[end1:beg2]),
+			[]rune(string(app.ui.cmdAccLeft)[beg1:end1]),
+			[]rune(string(app.ui.cmdAccLeft)[end2:]),
+		)
 		update(app)
 	default:
 		cmd, ok := gOpts.cmds[e.name]
@@ -2219,7 +2269,7 @@ func (e *execExpr) eval(app *app, args []string) {
 }
 
 func (e *listExpr) eval(app *app, args []string) {
-	for i := 0; i < e.count; i++ {
+	for range e.count {
 		for _, expr := range e.exprs {
 			expr.eval(app, nil)
 		}

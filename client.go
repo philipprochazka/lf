@@ -26,6 +26,19 @@ func init() {
 }
 
 func run() {
+	if gLogPath != "" {
+		f, err := os.OpenFile(gLogPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+		if err != nil {
+			log.Fatalf("failed to open log file: %s", err)
+		}
+		defer f.Close()
+		log.SetOutput(f)
+	} else {
+		log.SetOutput(io.Discard)
+	}
+
+	log.Print("hi!")
+
 	var screen tcell.Screen
 	var err error
 	if screen, err = tcell.NewScreen(); err != nil {
@@ -37,33 +50,12 @@ func run() {
 		screen.EnableMouse()
 	}
 
-	if gLogPath != "" {
-		f, err := os.OpenFile(gLogPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
-		if err != nil {
-			panic(err)
-		}
-		defer f.Close()
-		log.SetOutput(f)
-	} else {
-		log.SetOutput(io.Discard)
-	}
-
-	log.Print("hi!")
-
 	ui := newUI(screen)
 	nav := newNav(ui.wins[0].h)
 	app := newApp(ui, nav)
 
 	if err := nav.sync(); err != nil {
 		app.ui.echoerrf("sync: %s", err)
-	}
-
-	if err := app.nav.readMarks(); err != nil {
-		app.ui.echoerrf("reading marks file: %s", err)
-	}
-
-	if err := app.nav.readTags(); err != nil {
-		app.ui.echoerrf("reading tags file: %s", err)
 	}
 
 	if err := app.readHistory(); err != nil {
@@ -125,7 +117,7 @@ func readExpr() <-chan expr {
 	ch := make(chan expr)
 
 	go func() {
-		duration := 1 * time.Second
+		duration := 100 * time.Millisecond
 
 		c, err := net.Dial(gSocketProt, gSocketPath)
 		for err != nil {
@@ -138,6 +130,7 @@ func readExpr() <-chan expr {
 		fmt.Fprintf(c, "conn %d\n", gClientID)
 
 		ch <- &callExpr{"sync", nil, 1}
+		ch <- &callExpr{"on-init", nil, 1}
 
 		s := bufio.NewScanner(c)
 		for s.Scan() {

@@ -19,7 +19,7 @@ func serve() {
 	if gLogPath != "" {
 		f, err := os.OpenFile(gLogPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
-			panic(err)
+			log.Fatalf("failed to open log file: %s", err)
 		}
 		defer f.Close()
 		log.SetOutput(f)
@@ -64,7 +64,7 @@ func echoerr(c net.Conn, msg string) {
 	log.Print(msg)
 }
 
-func echoerrf(c net.Conn, format string, a ...interface{}) {
+func echoerrf(c net.Conn, format string, a ...any) {
 	echoerr(c, fmt.Sprintf(format, a...))
 }
 

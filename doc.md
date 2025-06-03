@@ -102,6 +102,7 @@ The following commands are provided by lf:
 	mark-remove    (modal)   (default '"')
 	tag
 	tag-toggle               (default 't')
+	tty-write
 
 The following command line commands are provided by lf:
 
@@ -137,7 +138,7 @@ The following command line commands are provided by lf:
 The following options can be used to customize the behavior of lf:
 
 	anchorfind        bool      (default true)
-	autoquit          bool      (default false)
+	autoquit          bool      (default true)
 	borderfmt         string    (default "\033[0m")
 	cleaner           string    (default '')
 	copyfmt           string    (default "\033[7;33m")
@@ -169,6 +170,7 @@ The following options can be used to customize the behavior of lf:
 	info              []string  (default '')
 	infotimefmtnew    string    (default 'Jan _2 15:04')
 	infotimefmtold    string    (default 'Jan _2  2006')
+	locale            string    (default '')
 	mouse             bool      (default false)
 	number            bool      (default false)
 	numberfmt         string    (default "\033[33m")
@@ -188,6 +190,7 @@ The following options can be used to customize the behavior of lf:
 	shell             string    (default 'sh' for Unix and 'cmd' for Windows)
 	shellflag         string    (default '-c' for Unix and '/c' for Windows)
 	shellopts         []string  (default '')
+	showbinds         bool      (default true)
 	sixel             bool      (default false)
 	smartcase         bool      (default true)
 	smartdia          bool      (default false)
@@ -237,6 +240,7 @@ The following special shell commands are used to customize the behavior of lf wh
 	on-cd
 	on-focus-gained
 	on-focus-lost
+	on-init
 	on-select
 	on-redraw
 	on-quit
@@ -566,6 +570,12 @@ You can define a new tag-clearing command by combining `tag` with `tag-toggle` (
 
 Tag a file with `*` or a single width character given in the argument if the file is untagged, otherwise remove the tag.
 
+## tty-write
+
+Write the given string to the tty.
+This is useful for sending escape sequences to the terminal to control its behavior (e.g. OSC 0 to set the window title).
+Using `tty-write` is preferred over directly writing to `/dev/tty` because the latter is not synchronized and can interfere with drawing the UI.
+
 # COMMAND LINE COMMANDS
 
 The prompt character specifies which of the several command-line modes you are in.
@@ -665,7 +675,7 @@ Character `:` is used as the separator for list options `[]int` and `[]string`.
 
 When this option is enabled, the find command starts matching patterns from the beginning of file names, otherwise, it can match at an arbitrary position.
 
-## autoquit (bool) (default false)
+## autoquit (bool) (default true)
 
 Automatically quit the server when there are no clients left connected.
 
@@ -811,7 +821,7 @@ Apply filter pattern after each keystroke during filtering.
 ## info ([]string)  (default ``)
 
 A list of information that is shown for directory items at the right side of the pane.
-Currently supported information types are `size`, `time`, `atime`, and `ctime`.
+Currently supported information types are `size`, `time`, `atime`, `ctime`, `perm`, `user` and `group`.
 Information is only shown when the pane width is more than twice the width of information.
 
 ## infotimefmtnew (string) (default `Jan _2 15:04`)
@@ -821,6 +831,12 @@ Format string of the file time shown in the info column when it matches this yea
 ## infotimefmtold (string) (default `Jan _2  2006`)
 
 Format string of the file time shown in the info column when it doesn't match this year.
+
+## locale (string) (default ``)
+
+An IETF BCP 47 language tag (e.g. `zh-CN`) for specifying the locale used when using sort type `natural` and `name`.
+An empty string means disable locale ordering, and the special value `*` is used to indicate reading the locale setting from the system environment.
+This feature is currently experimental.
 
 ## mouse (bool) (default false)
 
@@ -894,7 +910,7 @@ Draw rounded outer corners when the `drawbox` option is enabled.
 ## rulerfmt (string) (default `  %a|  %p|  \033[7;31m %m \033[0m|  \033[7;33m %c \033[0m|  \033[7;35m %s \033[0m|  \033[7;34m %f \033[0m|  %i/%t`)
 
 Format string of the ruler shown in the bottom right corner.
-Special expansions are provided, `%a` as the pressed keys, `%p` as the progress of file operations, `%m` as the number of files to be cut (moved), `%c` as the number of files to be copied, `%s` as the number of selected files, `%f` as the filter, `%i` as the position of the cursor, `%t` as the number of files shown in the current directory, `%h` as the number of files hidden in the current directory, and `%d` as the amount of free disk space remaining.
+Special expansions are provided, `%a` as the pressed keys, `%p` as the progress of file operations, `%m` as the number of files to be cut (moved), `%c` as the number of files to be copied, `%s` as the number of selected files, `%f` as the filter, `%i` as the position of the cursor, `%t` as the number of files shown in the current directory, `%h` as the number of files hidden in the current directory, `%P` as the scroll percentage, and `%d` as the amount of free disk space remaining.
 Additional expansions are provided for environment variables exported by lf, in the form `%{lf_<name>}` (e.g. `%{lf_selmode}`). This is useful for displaying the current settings.
 Expansions are also provided for user-defined options, in the form `%{lf_user_<name>}` (e.g. `%{lf_user_foo}`).
 The `|` character splits the format string into sections. Any section containing a failed expansion (result is a blank string) is discarded and not shown.
@@ -927,6 +943,10 @@ Command line flag used to pass shell commands.
 ## shellopts ([]string)  (default ``)
 
 List of shell options to pass to the shell executable.
+
+## showbinds (bool) (default true)
+
+Show bindings associated with pressed keys.
 
 ## sixel (bool) (default false)
 
@@ -1131,6 +1151,10 @@ This shell command can be defined to be executed when the terminal gains focus.
 
 This shell command can be defined to be executed when the terminal loses focus.
 
+## on-init
+
+This shell command can be defined to be executed after initializing and connecting to the server.
+
 ## on-select
 
 This shell command can be defined to be executed after the selection changes.
@@ -1179,7 +1203,7 @@ Command `set` is used to set an option which can be a boolean, integer, or strin
 	set sortby "time"  # string value with double quotes (backslash escapes)
 
 Command `setlocal` is used to set a local option for a directory which can be a boolean or string.
-Currently supported local options are `dirfirst`, `dironly`, `hidden`, `info`, `reverse`, and `sortby`.
+Currently supported local options are `dircounts`, `dirfirst`, `dironly`, `hidden`, `info`, `reverse`, `sortby` and `locale`.
 Adding a trailing path separator (i.e. `/` for Unix and `\` for Windows) sets the option for the given directory along with its subdirectories:
 
 	setlocal /foo/bar hidden         # boolean enable
@@ -1453,6 +1477,7 @@ The following types of information are supported:
 	cmds     list of commands created by the 'cmd' command
 	jumps    contents of the jump list, showing previously visited locations
 	history  list of previously executed commands on the command line
+	files    list of files in the currently open directory as displayed by lf, empty if dir is still loading
 
 This is useful for scripting actions based on the internal state of lf.
 For example, to select a previous command using fzf and execute it:
@@ -1663,11 +1688,11 @@ You can define it just as you would define any other command:
 	    '
 	}}
 
-If you want to print escape sequences, you may redirect `printf` output to `/dev/tty`.
+If you want to send escape sequences to the terminal, you can use the `tty-write` command to do so.
 The following xterm-specific escape sequence sets the terminal title to the working directory:
 
 	cmd on-cd &{{
-	    printf "\033]0; $PWD\007" > /dev/tty
+        lf -remote "send $id tty-write \"\033]0;$PWD\007\""
 	}}
 
 This command runs whenever you change the directory but not on startup.

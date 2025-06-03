@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log"
 	"os"
@@ -47,10 +48,7 @@ func init() {
 	}
 
 	if envEditor == "" {
-		envEditor = os.Getenv("EDITOR")
-		if envEditor == "" {
-			envEditor = "notepad"
-		}
+		envEditor = cmp.Or(os.Getenv("EDITOR"), "notepad")
 	}
 
 	if envPager == "" {
@@ -76,10 +74,7 @@ func init() {
 		Username: username,
 	}
 
-	data := os.Getenv("LF_CONFIG_HOME")
-	if data == "" {
-		data = os.Getenv("LOCALAPPDATA")
-	}
+	data := cmp.Or(os.Getenv("LF_CONFIG_HOME"), os.Getenv("LOCALAPPDATA"))
 
 	gConfigPaths = []string{
 		filepath.Join(os.Getenv("ProgramData"), "lf", "lfrc"),
@@ -189,31 +184,28 @@ func isHidden(f os.FileInfo, path string, hiddenfiles []string) bool {
 
 	hidden := false
 	for _, pattern := range hiddenfiles {
-		matched := matchPattern(strings.TrimPrefix(pattern, "!"), f.Name(), path)
-		if strings.HasPrefix(pattern, "!") && matched {
-			hidden = false
-		} else if matched {
-			hidden = true
+		if matchPattern(strings.TrimPrefix(pattern, "!"), f.Name(), path) {
+			hidden = !strings.HasPrefix(pattern, "!")
 		}
 	}
 
 	return hidden
 }
 
-func userName(f os.FileInfo) string {
+func userName(_ os.FileInfo) string {
 	return ""
 }
 
-func groupName(f os.FileInfo) string {
+func groupName(_ os.FileInfo) string {
 	return ""
 }
 
-func linkCount(f os.FileInfo) string {
+func linkCount(_ os.FileInfo) string {
 	return ""
 }
 
 func errCrossDevice(err error) bool {
-	return err.(*os.LinkError).Err.(windows.Errno) == 17
+	return err.(*os.LinkError).Err.(windows.Errno) == windows.ERROR_NOT_SAME_DEVICE
 }
 
 func quoteString(s string) string {

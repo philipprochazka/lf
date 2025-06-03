@@ -80,6 +80,7 @@ var (
 		"mark-remove",
 		"tag",
 		"tag-toggle",
+		"tty-write",
 		"cmd-escape",
 		"cmd-complete",
 		"cmd-menu-complete",
@@ -116,7 +117,7 @@ var (
 
 func getOptWords(opts any) (optWords []string) {
 	t := reflect.TypeOf(opts)
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
 		switch field.Type.Kind() {
 		case reflect.Map:
@@ -134,9 +135,9 @@ func getOptWords(opts any) (optWords []string) {
 
 func getLocalOptWords(localOpts any) (localOptWords []string) {
 	t := reflect.TypeOf(localOpts)
-	for i := 0; i < t.NumField(); i++ {
+	for i := range t.NumField() {
 		field := t.Field(i)
-		name := strings.TrimSuffix(field.Name, "s")
+		name := field.Name
 		if field.Type.Kind() != reflect.Map {
 			continue
 		}
@@ -215,9 +216,9 @@ func matchExec(s string) (matches []string, longest []rune) {
 		}
 	}
 
-	sort.Strings(words)
-
 	if len(words) > 0 {
+		sort.Strings(words)
+
 		uniq := words[:1]
 		for i := 1; i < len(words); i++ {
 			if words[i] != words[i-1] {
@@ -294,7 +295,8 @@ func matchFile(s string) (matches []string, longest []rune) {
 }
 
 func matchCmd(s string) (matches []string, longest []rune) {
-	words := gCmdWords
+	words := make([]string, 0, len(gCmdWords)+len(gOpts.cmds))
+	words = append(words, gCmdWords...)
 	for c := range gOpts.cmds {
 		words = append(words, c)
 	}

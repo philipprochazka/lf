@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"log"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -52,10 +54,7 @@ func init() {
 	}
 
 	if envEditor == "" {
-		envEditor = os.Getenv("EDITOR")
-		if envEditor == "" {
-			envEditor = "vi"
-		}
+		envEditor = cmp.Or(os.Getenv("EDITOR"), "vi")
 	}
 
 	if envPager == "" {
@@ -85,13 +84,11 @@ func init() {
 	}
 	gUser = u
 
-	config := os.Getenv("LF_CONFIG_HOME")
-	if config == "" {
-		config = os.Getenv("XDG_CONFIG_HOME")
-	}
-	if config == "" {
-		config = filepath.Join(gUser.HomeDir, ".config")
-	}
+	config := cmp.Or(
+		os.Getenv("LF_CONFIG_HOME"),
+		os.Getenv("XDG_CONFIG_HOME"),
+		filepath.Join(gUser.HomeDir, ".config"),
+	)
 
 	gConfigPaths = []string{
 		filepath.Join("/etc", "lf", "lfrc"),
@@ -108,23 +105,18 @@ func init() {
 		filepath.Join(config, "lf", "icons"),
 	}
 
-	data := os.Getenv("LF_DATA_HOME")
-	if data == "" {
-		data = os.Getenv("XDG_DATA_HOME")
-	}
-	if data == "" {
-		data = filepath.Join(gUser.HomeDir, ".local", "share")
-	}
+	data := cmp.Or(
+		os.Getenv("LF_DATA_HOME"),
+		os.Getenv("XDG_DATA_HOME"),
+		filepath.Join(gUser.HomeDir, ".local", "share"),
+	)
 
 	gFilesPath = filepath.Join(data, "lf", "files")
 	gMarksPath = filepath.Join(data, "lf", "marks")
 	gTagsPath = filepath.Join(data, "lf", "tags")
 	gHistoryPath = filepath.Join(data, "lf", "history")
 
-	runtime := os.Getenv("XDG_RUNTIME_DIR")
-	if runtime == "" {
-		runtime = os.TempDir()
-	}
+	runtime := cmp.Or(os.Getenv("XDG_RUNTIME_DIR"), os.TempDir())
 
 	gDefaultSocketPath = filepath.Join(runtime, fmt.Sprintf("lf.%s.sock", gUser.Username))
 }
@@ -155,7 +147,7 @@ func shellKill(cmd *exec.Cmd) error {
 	pgid, err := unix.Getpgid(cmd.Process.Pid)
 	if err == nil && cmd.Process.Pid == pgid {
 		// kill the process group
-		err = unix.Kill(-pgid, 15)
+		err = unix.Kill(-pgid, syscall.SIGTERM)
 		if err == nil {
 			return nil
 		}
@@ -188,11 +180,8 @@ func isExecutable(f os.FileInfo) bool {
 func isHidden(f os.FileInfo, path string, hiddenfiles []string) bool {
 	hidden := false
 	for _, pattern := range hiddenfiles {
-		matched := matchPattern(strings.TrimPrefix(pattern, "!"), f.Name(), path)
-		if strings.HasPrefix(pattern, "!") && matched {
-			hidden = false
-		} else if matched {
-			hidden = true
+		if matchPattern(strings.TrimPrefix(pattern, "!"), f.Name(), path) {
+			hidden = !strings.HasPrefix(pattern, "!")
 		}
 	}
 	return hidden
@@ -200,31 +189,29 @@ func isHidden(f os.FileInfo, path string, hiddenfiles []string) bool {
 
 func userName(f os.FileInfo) string {
 	if stat, ok := f.Sys().(*syscall.Stat_t); ok {
-		uid := fmt.Sprint(stat.Uid)
+		uid := strconv.FormatUint(uint64(stat.Uid), 10)
 		if u, err := user.LookupId(uid); err == nil {
 			return u.Username
-		} else {
-			return uid
 		}
+		return uid
 	}
 	return ""
 }
 
 func groupName(f os.FileInfo) string {
 	if stat, ok := f.Sys().(*syscall.Stat_t); ok {
-		gid := fmt.Sprint(stat.Gid)
+		gid := strconv.FormatUint(uint64(stat.Gid), 10)
 		if g, err := user.LookupGroupId(gid); err == nil {
 			return g.Name
-		} else {
-			return gid
 		}
+		return gid
 	}
 	return ""
 }
 
 func linkCount(f os.FileInfo) string {
 	if stat, ok := f.Sys().(*syscall.Stat_t); ok {
-		return fmt.Sprint(stat.Nlink)
+		return strconv.FormatUint(uint64(stat.Nlink), 10)
 	}
 	return ""
 }

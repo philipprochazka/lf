@@ -35,6 +35,7 @@ type app struct {
 	menuCompInd    int
 	selectionOut   []string
 	watch          *watch
+	quitting       bool
 }
 
 func newApp(ui *ui, nav *nav) *app {
@@ -66,6 +67,14 @@ func newApp(ui *ui, nav *nav) *app {
 }
 
 func (app *app) quit() {
+	// Using synchronous shell commands for `on-quit` can cause this to be
+	// called again, so a guard variable is introduced here to prevent an
+	// infinite loop.
+	if app.quitting {
+		return
+	}
+	app.quitting = true
+
 	onQuit(app)
 
 	if gOpts.history {
@@ -249,7 +258,6 @@ func (app *app) writeHistory() error {
 // separate goroutines and sent here for update.
 func (app *app) loop() {
 	go app.nav.previewLoop(app.ui)
-	go app.nav.dirPreviewLoop(app.ui)
 
 	var serverChan <-chan expr
 	if !gSingleMode {
@@ -327,7 +335,6 @@ func (app *app) loop() {
 			app.quit()
 
 			app.nav.previewChan <- ""
-			app.nav.dirPreviewChan <- nil
 
 			log.Print("bye!")
 
@@ -397,13 +404,18 @@ func (app *app) loop() {
 				oldCurrPath = curr.path
 			}
 
-			for i := range app.nav.dirs {
-				if app.nav.dirs[i].path == d.path {
-					app.nav.dirs[i] = d
+			if wd, err := os.Getwd(); err == nil && wd != app.nav.currDir().path {
+				// if any path component in the current path is renamed, then
+				// the entire set of directories has to be reloaded
+				app.nav.cd(wd)
+			} else {
+				for i := range app.nav.dirs {
+					if app.nav.dirs[i].path == d.path {
+						app.nav.dirs[i] = d
+					}
 				}
+				app.nav.position()
 			}
-
-			app.nav.position()
 
 			curr, err := app.nav.currFile()
 			if err == nil {
@@ -418,7 +430,7 @@ func (app *app) loop() {
 				}
 			}
 
-			app.setWatchPaths()
+			app.watchDir(d)
 
 			app.ui.draw(app.nav)
 		case r := <-app.nav.regChan:
@@ -428,17 +440,15 @@ func (app *app) loop() {
 			if err == nil {
 				if r.path == curr.path {
 					app.ui.regPrev = r
+					if gOpts.sixel {
+						app.ui.sxScreen.forceClear = true
+					}
 				}
 			}
 
 			app.ui.draw(app.nav)
 		case f := <-app.nav.fileChan:
-			dirs := app.nav.dirs
-			if app.ui.dirPrev != nil {
-				dirs = append(dirs, app.ui.dirPrev)
-			}
-
-			for _, dir := range dirs {
+			for _, dir := range app.nav.dirCache {
 				if dir.path != filepath.Dir(f.path) {
 					continue
 				}
@@ -463,6 +473,11 @@ func (app *app) loop() {
 		case path := <-app.nav.delChan:
 			delete(app.nav.dirCache, path)
 			delete(app.nav.regCache, path)
+
+			delete(app.nav.selections, path)
+			if len(app.nav.selections) == 0 {
+				app.nav.selectionInd = 0
+			}
 		case ev := <-app.ui.evChan:
 			e := app.ui.readEvent(ev, app.nav)
 			if e == nil {
@@ -501,7 +516,6 @@ func (app *app) loop() {
 
 func (app *app) runCmdSync(cmd *exec.Cmd, pause_after bool) {
 	app.nav.previewChan <- ""
-	app.nav.dirPreviewChan <- nil
 
 	if err := app.ui.suspend(); err != nil {
 		log.Printf("suspend: %s", err)
@@ -535,14 +549,16 @@ func (app *app) runShell(s string, args []string, prefix string) {
 	app.nav.exportFiles()
 	app.ui.exportSizes()
 	app.ui.exportMode()
+	exportLfPath()
 	exportOpts()
 
 	gState.mutex.Lock()
-	gState.data["maps"] = listBinds(gOpts.keys).String()
-	gState.data["cmaps"] = listBinds(gOpts.cmdkeys).String()
-	gState.data["cmds"] = listCmds().String()
-	gState.data["jumps"] = listJumps(app.nav.jumpList, app.nav.jumpListInd).String()
-	gState.data["history"] = listHistory(app.cmdHistory).String()
+	gState.data["maps"] = listBinds(gOpts.keys)
+	gState.data["cmaps"] = listBinds(gOpts.cmdkeys)
+	gState.data["cmds"] = listCmds()
+	gState.data["jumps"] = listJumps(app.nav.jumpList, app.nav.jumpListInd)
+	gState.data["history"] = listHistory(app.cmdHistory)
+	gState.data["files"] = listFilesInCurrDir(app.nav)
 	gState.mutex.Unlock()
 
 	cmd := shellCommand(s, args)
@@ -629,21 +645,17 @@ func (app *app) runShell(s string, args []string, prefix string) {
 	}
 }
 
-func (app *app) setWatchPaths() {
-	if !gOpts.watch || len(app.nav.dirs) == 0 {
+func (app *app) watchDir(dir *dir) {
+	if !gOpts.watch {
 		return
 	}
 
-	paths := make(map[string]bool)
-	for _, dir := range app.nav.dirs {
-		paths[dir.path] = true
-	}
+	app.watch.add(dir.path)
 
-	for _, file := range app.nav.currDir().allFiles {
+	// ensure dircounts are updated for child directories
+	for _, file := range dir.allFiles {
 		if file.IsDir() {
-			paths[file.path] = true
+			app.watch.add(file.path)
 		}
 	}
-
-	app.watch.set(paths)
 }

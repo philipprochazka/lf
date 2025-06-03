@@ -145,7 +145,7 @@ var gKeyVal = map[tcell.Key]string{
 var gValKey map[string]tcell.Key
 
 func init() {
-	gValKey = make(map[string]tcell.Key)
+	gValKey = make(map[string]tcell.Key, len(gKeyVal))
 	for k, v := range gKeyVal {
 		gValKey[v] = k
 	}
@@ -166,11 +166,12 @@ func (win *win) renew(w, h, x, y int) {
 func printLength(s string) int {
 	ind := 0
 	off := 0
-	for i := 0; i < len(s); i++ {
+	slen := len(s)
+	for i := 0; i < slen; i++ {
 		r, w := utf8.DecodeRuneInString(s[i:])
 
-		if r == gEscapeCode && i+1 < len(s) && s[i+1] == '[' {
-			j := strings.IndexAny(s[i:min(len(s), i+64)], "mK")
+		if r == gEscapeCode && i+1 < slen && s[i+1] == '[' {
+			j := strings.IndexAny(s[i:min(slen, i+64)], "mK")
 			if j == -1 {
 				continue
 			}
@@ -194,11 +195,12 @@ func printLength(s string) int {
 func (win *win) print(screen tcell.Screen, x, y int, st tcell.Style, s string) tcell.Style {
 	off := x
 	var comb []rune
-	for i := 0; i < len(s); i++ {
+	slen := len(s)
+	for i := 0; i < slen; i++ {
 		r, w := utf8.DecodeRuneInString(s[i:])
 
-		if r == gEscapeCode && i+1 < len(s) && s[i+1] == '[' {
-			j := strings.IndexAny(s[i:min(len(s), i+64)], "mK")
+		if r == gEscapeCode && i+1 < slen && s[i+1] == '[' {
+			j := strings.IndexAny(s[i:min(slen, i+64)], "mK")
 			if j == -1 {
 				continue
 			}
@@ -227,11 +229,11 @@ func (win *win) print(screen tcell.Screen, x, y int, st tcell.Style, s string) t
 		i += w - 1
 
 		if r == '\t' {
-			s := gOpts.tabstop - (x-off)%gOpts.tabstop
-			for i := 0; i < s && x+i < win.w; i++ {
+			ind := gOpts.tabstop - (x-off)%gOpts.tabstop
+			for i := 0; i < ind && x+i < win.w; i++ {
 				screen.SetContent(win.x+x+i, win.y+y, ' ', nil, st)
 			}
-			x += s
+			x += ind
 		} else {
 			x += runewidth.RuneWidth(r)
 		}
@@ -240,7 +242,7 @@ func (win *win) print(screen tcell.Screen, x, y int, st tcell.Style, s string) t
 	return st
 }
 
-func (win *win) printf(screen tcell.Screen, x, y int, st tcell.Style, format string, a ...interface{}) {
+func (win *win) printf(screen tcell.Screen, x, y int, st tcell.Style, format string, a ...any) {
 	win.print(screen, x, y, st, fmt.Sprintf(format, a...))
 }
 
@@ -287,22 +289,22 @@ func infotimefmt(t time.Time) string {
 	return t.Format(gOpts.infotimefmtold)
 }
 
-func fileInfo(f *file, d *dir) string {
-	var info string
+func fileInfo(f *file, d *dir, userWidth int, groupWidth int) string {
+	var info strings.Builder
 
 	for _, s := range getInfo(d.path) {
 		switch s {
 		case "size":
-			if f.IsDir() && gOpts.dircounts {
+			if f.IsDir() && getDirCounts(d.path) {
 				switch {
 				case f.dirCount < -1:
-					info = fmt.Sprintf("%s    !", info)
+					info.WriteString("    !")
 				case f.dirCount < 0:
-					info = fmt.Sprintf("%s    ?", info)
+					info.WriteString("    ?")
 				case f.dirCount < 1000:
-					info = fmt.Sprintf("%s %4d", info, f.dirCount)
+					fmt.Fprintf(&info, " %4d", f.dirCount)
 				default:
-					info = fmt.Sprintf("%s 999+", info)
+					info.WriteString(" 999+")
 				}
 				continue
 			}
@@ -313,19 +315,25 @@ func fileInfo(f *file, d *dir) string {
 			} else {
 				sz = humanize(f.TotalSize())
 			}
-			info = fmt.Sprintf("%s %4s", info, sz)
+			fmt.Fprintf(&info, " %4s", sz)
 		case "time":
-			info = fmt.Sprintf("%s %*s", info, max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.ModTime()))
+			fmt.Fprintf(&info, " %*s", max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.ModTime()))
 		case "atime":
-			info = fmt.Sprintf("%s %*s", info, max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.accessTime))
+			fmt.Fprintf(&info, " %*s", max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.accessTime))
 		case "ctime":
-			info = fmt.Sprintf("%s %*s", info, max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.changeTime))
+			fmt.Fprintf(&info, " %*s", max(len(gOpts.infotimefmtnew), len(gOpts.infotimefmtold)), infotimefmt(f.changeTime))
+		case "perm":
+			info.WriteString(" " + f.FileInfo.Mode().String())
+		case "user":
+			fmt.Fprintf(&info, " %-*s", userWidth, userName(f.FileInfo))
+		case "group":
+			fmt.Fprintf(&info, " %-*s", groupWidth, groupName(f.FileInfo))
 		default:
 			log.Printf("unknown info type: %s", s)
 		}
 	}
 
-	return info
+	return info.String()
 }
 
 type dirContext struct {
@@ -348,7 +356,7 @@ type dirStyle struct {
 	role   dirRole
 }
 
-func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirStyle, previewLoading bool) {
+func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirStyle) {
 	if win.w < 5 || dir == nil {
 		return
 	}
@@ -359,32 +367,19 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 		win.print(ui.screen, 2, 0, messageStyle, "permission denied")
 		return
 	}
-	if (dir.loading && len(dir.files) == 0) || (dirStyle.role == Preview && dir.loading && gOpts.dirpreviews) {
-		if dirStyle.role != Preview || previewLoading {
-			win.print(ui.screen, 2, 0, messageStyle, "loading...")
-		}
+	fileslen := len(dir.files)
+	if dir.loading && fileslen == 0 {
+		win.print(ui.screen, 2, 0, messageStyle, "loading...")
 		return
 	}
 
-	if dirStyle.role == Preview && gOpts.dirpreviews && len(gOpts.previewer) > 0 {
-		// Print previewer result instead of default directory print operation.
-		st := tcell.StyleDefault
-		for i, l := range dir.lines {
-			if i > win.h-1 {
-				break
-			}
-
-			st = win.print(ui.screen, 2, i, st, l)
-		}
-		return
-	}
-	if len(dir.files) == 0 {
+	if fileslen == 0 {
 		win.print(ui.screen, 2, 0, messageStyle, "empty")
 		return
 	}
 
 	beg := max(dir.ind-dir.pos, 0)
-	end := min(beg+win.h, len(dir.files))
+	end := min(beg+win.h, fileslen)
 
 	if beg > end {
 		return
@@ -397,8 +392,25 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 		if gOpts.number && gOpts.relativenumber {
 			lnwidth++
 		}
-		for j := 10; j <= len(dir.files); j *= 10 {
+		for j := 10; j <= fileslen; j *= 10 {
 			lnwidth++
+		}
+	}
+
+	var userWidth int
+	var groupWidth int
+
+	// Only fetch user/group widths if configured to display them
+	for _, s := range getInfo(dir.path) {
+		switch s {
+		case "user":
+			userWidth = getUserWidth(dir, beg, end)
+		case "group":
+			groupWidth = getGroupWidth(dir, beg, end)
+		}
+
+		if userWidth > 0 && groupWidth > 0 {
+			break
 		}
 	}
 
@@ -446,7 +458,7 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 		}
 
 		tag := " "
-		if val, ok := context.tags[path]; ok && len(val) > 0 {
+		if val, ok := context.tags[evalSymlinks(path)]; ok && len(val) > 0 {
 			tag = val
 		}
 
@@ -461,10 +473,11 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 		// subtract space for tag and icon
 		maxFilenameWidth := maxWidth - 1 - runeSliceWidth(icon)
 
-		info := fileInfo(f, dir)
-		showInfo := len(info) > 0 && 2*len(info) < maxWidth
+		info := fileInfo(f, dir, userWidth, groupWidth)
+		infolen := len(info)
+		showInfo := infolen > 0 && 2*infolen < maxWidth
 		if showInfo {
-			maxFilenameWidth -= len(info)
+			maxFilenameWidth -= infolen
 		}
 
 		filename := []rune(f.Name())
@@ -501,7 +514,9 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 			line = append(line, ' ')
 			win.print(ui.screen, lnwidth+2, i, st, fmt.Sprintf(cursorFmt, string(line)))
 		} else {
-			if tag != " " {
+			if tag == " " {
+				win.print(ui.screen, lnwidth+1, i, st, " ")
+			} else {
 				tagStr := fmt.Sprintf(optionToFmtstr(gOpts.tagfmt), tag)
 				win.print(ui.screen, lnwidth+1, i, tcell.StyleDefault, tagStr)
 			}
@@ -514,9 +529,30 @@ func (win *win) printDir(ui *ui, dir *dir, context *dirContext, dirStyle *dirSty
 				win.print(ui.screen, lnwidth+2, i, iconStyle, string(icon))
 			}
 
-			win.print(ui.screen, lnwidth+2+runeSliceWidth(icon), i, st, string(filename))
+			line := append(filename, ' ')
+			win.print(ui.screen, lnwidth+2+runeSliceWidth(icon), i, st, string(line))
 		}
 	}
+}
+
+func getUserWidth(dir *dir, beg int, end int) int {
+	maxw := 0
+
+	for _, f := range dir.files[beg:end] {
+		maxw = max(len(userName(f.FileInfo)), maxw)
+	}
+
+	return maxw
+}
+
+func getGroupWidth(dir *dir, beg int, end int) int {
+	maxw := 0
+
+	for _, f := range dir.files[beg:end] {
+		maxw = max(len(groupName(f.FileInfo)), maxw)
+	}
+
+	return maxw
 }
 
 func getWidths(wtot int) []int {
@@ -533,7 +569,7 @@ func getWidths(wtot int) []int {
 	}
 
 	wsum := 0
-	for i := 0; i < wlen-1; i++ {
+	for i := range wlen - 1 {
 		widths[i] = gOpts.ratios[i] * wtot / rsum
 		wsum += widths[i]
 	}
@@ -545,13 +581,12 @@ func getWidths(wtot int) []int {
 func getWins(screen tcell.Screen) []*win {
 	wtot, htot := screen.Size()
 
-	var wins []*win
-
 	widths := getWidths(wtot)
 
 	wacc := 0
 	wlen := len(widths)
-	for i := 0; i < wlen; i++ {
+	wins := make([]*win, 0, wlen)
+	for i := range wlen {
 		if gOpts.drawbox {
 			wacc++
 			wins = append(wins, newWin(widths[i], htot-4, wacc, 2))
@@ -580,7 +615,7 @@ type ui struct {
 	keyChan     chan string
 	tevChan     chan tcell.Event
 	evChan      chan tcell.Event
-	menuBuf     *bytes.Buffer
+	menu        string
 	cmdPrefix   string
 	cmdAccLeft  []rune
 	cmdAccRight []rune
@@ -682,10 +717,13 @@ func (ui *ui) echoerr(msg string) {
 	log.Printf("error: %s", msg)
 }
 
-func (ui *ui) echoerrf(format string, a ...interface{}) {
+func (ui *ui) echoerrf(format string, a ...any) {
 	ui.echoerr(fmt.Sprintf(format, a...))
 }
 
+// This represents the preview for a regular file.
+// This can also be used to represent the preview of a directory if
+// `dirpreviews` is enabled.
 type reg struct {
 	loading  bool
 	volatile bool
@@ -718,10 +756,10 @@ func (ui *ui) loadFile(app *app, volatile bool) {
 		return
 	}
 
-	if curr.IsDir() {
-		ui.dirPrev = app.nav.loadDir(curr.path)
-	} else if curr.Mode().IsRegular() {
+	if curr.Mode().IsRegular() || (curr.IsDir() && gOpts.dirpreviews) {
 		ui.regPrev = app.nav.loadReg(curr.path, volatile)
+	} else if curr.IsDir() {
+		ui.dirPrev = app.nav.loadDir(curr.path)
 	}
 }
 
@@ -729,6 +767,9 @@ func (ui *ui) loadFileInfo(nav *nav) {
 	if !nav.init {
 		return
 	}
+
+	ui.msg = ""
+	ui.msgIsStat = true
 
 	curr, err := nav.currFile()
 	if err != nil {
@@ -756,15 +797,14 @@ func (ui *ui) loadFileInfo(nav *nav) {
 	replace("%t", curr.ModTime().Format(gOpts.timefmt))
 	replace("%l", curr.linkTarget)
 
-	fileInfo := ""
+	var fileInfo strings.Builder
 	for _, section := range strings.Split(statfmt, "\x1f") {
 		if !strings.Contains(section, "\x00") {
-			fileInfo += section
+			fileInfo.WriteString(section)
 		}
 	}
 
-	ui.msg = fileInfo
-	ui.msgIsStat = true
+	ui.msg = fileInfo.String()
 }
 
 func (ui *ui) drawPromptLine(nav *nav) {
@@ -834,7 +874,7 @@ func formatRulerOpt(name string, val string) string {
 
 	// display name of builtin options for clarity
 	if !strings.HasPrefix(name, "lf_user_") {
-		val = fmt.Sprintf("%s=%s", strings.TrimPrefix(name, "lf_"), val)
+		return fmt.Sprintf("%s=%s", strings.TrimPrefix(name, "lf_"), val)
 	}
 
 	return val
@@ -852,15 +892,26 @@ func (ui *ui) drawRuler(nav *nav) {
 	hid := len(dir.allFiles) - tot
 	acc := string(ui.keyCount) + string(ui.keyAcc)
 
+	var percentage string
+	beg := max(dir.ind-dir.pos, 0)
+	switch {
+	case tot <= nav.height:
+		percentage = "All"
+	case beg == 0:
+		percentage = "Top"
+	case beg == tot-nav.height:
+		percentage = "Bot"
+	default:
+		percentage = fmt.Sprintf("%2d%%", beg*100/(tot-nav.height))
+	}
+
 	copy := 0
 	move := 0
-	if len(nav.saves) > 0 {
-		for _, cp := range nav.saves {
-			if cp {
-				copy++
-			} else {
-				move++
-			}
+	for _, cp := range nav.saves {
+		if cp {
+			copy++
+		} else {
+			move++
 		}
 	}
 
@@ -869,8 +920,7 @@ func (ui *ui) drawRuler(nav *nav) {
 	progress := []string{}
 
 	if nav.copyTotal > 0 {
-		percentage := int((100 * float64(nav.copyBytes)) / float64(nav.copyTotal))
-		progress = append(progress, fmt.Sprintf("[%d%%]", percentage))
+		progress = append(progress, fmt.Sprintf("[%d%%]", nav.copyBytes*100/nav.copyTotal))
 	}
 
 	if nav.moveTotal > 0 {
@@ -900,11 +950,13 @@ func (ui *ui) drawRuler(nav *nav) {
 		case "%f":
 			result = strings.Join(dir.filter, " ")
 		case "%i":
-			result = fmt.Sprint(ind)
+			result = strconv.Itoa(ind)
 		case "%t":
-			result = fmt.Sprint(tot)
+			result = strconv.Itoa(tot)
 		case "%h":
-			result = fmt.Sprint(hid)
+			result = strconv.Itoa(hid)
+		case "%P":
+			result = percentage
 		case "%d":
 			result = diskFree(dir.path)
 		default:
@@ -918,13 +970,13 @@ func (ui *ui) drawRuler(nav *nav) {
 		}
 		return result
 	})
-	ruler := ""
+	var ruler strings.Builder
 	for _, section := range strings.Split(rulerfmt, "\x1f") {
 		if !strings.Contains(section, "\x00") {
-			ruler += section
+			ruler.WriteString(section)
 		}
 	}
-	ui.msgWin.printRight(ui.screen, 0, st, ruler)
+	ui.msgWin.printRight(ui.screen, 0, st, ruler.String())
 }
 
 func (ui *ui) drawBox() {
@@ -955,7 +1007,7 @@ func (ui *ui) drawBox() {
 	}
 
 	wacc := 0
-	for wind := 0; wind < len(ui.wins)-1; wind++ {
+	for wind := range len(ui.wins) - 1 {
 		wacc += ui.wins[wind].w + 1
 		ui.screen.SetContent(wacc, 1, tcell.RuneTTee, nil, st)
 		for i := 2; i < h-2; i++ {
@@ -981,14 +1033,7 @@ func (ui *ui) draw(nav *nav) {
 	st := tcell.StyleDefault
 	context := dirContext{selections: nav.selections, saves: nav.saves, tags: nav.tags}
 
-	// XXX: manual clean without flush to avoid flicker on Windows
-	wtot, htot := ui.screen.Size()
-	for i := 0; i < wtot; i++ {
-		for j := 0; j < htot; j++ {
-			ui.screen.SetContent(i, j, ' ', nil, st)
-		}
-	}
-	ui.sxScreen.sixel = nil
+	ui.screen.Clear()
 
 	ui.drawPromptLine(nav)
 
@@ -996,15 +1041,14 @@ func (ui *ui) draw(nav *nav) {
 	if gOpts.preview {
 		wins--
 	}
-	for i := 0; i < wins; i++ {
+	for i := range wins {
 		role := Parent
 		if i == wins-1 {
 			role = Active
 		}
 		if dir := ui.dirOfWin(nav, i); dir != nil {
 			ui.wins[i].printDir(ui, dir, &context,
-				&dirStyle{colors: ui.styles, icons: ui.icons, role: role},
-				nav.previewLoading)
+				&dirStyle{colors: ui.styles, icons: ui.icons, role: role})
 		}
 	}
 
@@ -1027,17 +1071,17 @@ func (ui *ui) draw(nav *nav) {
 		ui.screen.ShowCursor(ui.msgWin.x+runeSliceWidth(prefix)+runeSliceWidth(left), ui.msgWin.y)
 	}
 
-	if gOpts.preview {
-		curr, err := nav.currFile()
-		if err == nil {
-			preview := ui.wins[len(ui.wins)-1]
-
-			if curr.IsDir() {
-				preview.printDir(ui, ui.dirPrev, &context,
-					&dirStyle{colors: ui.styles, icons: ui.icons, role: Preview},
-					nav.previewLoading)
-			} else if curr.Mode().IsRegular() {
+	curr, err := nav.currFile()
+	if err == nil {
+		preview := ui.wins[len(ui.wins)-1]
+		ui.sxScreen.clearSixel(preview, ui.screen, curr.path)
+		if gOpts.preview {
+			if curr.Mode().IsRegular() || (curr.IsDir() && gOpts.dirpreviews) {
 				preview.printReg(ui.screen, ui.regPrev, nav.previewLoading, &ui.sxScreen)
+			} else if curr.IsDir() {
+				ui.sxScreen.lastFile = ""
+				preview.printDir(ui, ui.dirPrev, &context,
+					&dirStyle{colors: ui.styles, icons: ui.icons, role: Preview})
 			}
 		}
 	}
@@ -1046,8 +1090,8 @@ func (ui *ui) draw(nav *nav) {
 		ui.drawBox()
 	}
 
-	if ui.menuBuf != nil {
-		lines := strings.Split(ui.menuBuf.String(), "\n")
+	if ui.menu != "" {
+		lines := strings.Split(ui.menu, "\n")
 
 		lines = lines[:len(lines)-1]
 
@@ -1067,10 +1111,6 @@ func (ui *ui) draw(nav *nav) {
 	}
 
 	ui.screen.Show()
-	if ui.menuBuf == nil && ui.cmdPrefix == "" && ui.sxScreen.sixel != nil {
-		ui.sxScreen.lastFile = ui.regPrev.path
-		ui.sxScreen.showSixels()
-	}
 }
 
 func findBinds(keys map[string]expr, prefix string) (binds map[string]expr, ok bool) {
@@ -1087,11 +1127,11 @@ func findBinds(keys map[string]expr, prefix string) (binds map[string]expr, ok b
 	return
 }
 
-func listExprMap(binds map[string]expr, title string) *bytes.Buffer {
+func listExprMap(binds map[string]expr, title string) string {
 	t := new(tabwriter.Writer)
 	b := new(bytes.Buffer)
 
-	var keys []string
+	keys := make([]string, 0, len(binds))
 	for k := range binds {
 		keys = append(keys, k)
 	}
@@ -1104,18 +1144,18 @@ func listExprMap(binds map[string]expr, title string) *bytes.Buffer {
 	}
 	t.Flush()
 
-	return b
+	return b.String()
 }
 
-func listBinds(binds map[string]expr) *bytes.Buffer {
+func listBinds(binds map[string]expr) string {
 	return listExprMap(binds, "keys")
 }
 
-func listCmds() *bytes.Buffer {
+func listCmds() string {
 	return listExprMap(gOpts.cmds, "name")
 }
 
-func listJumps(jumps []string, ind int) *bytes.Buffer {
+func listJumps(jumps []string, ind int) string {
 	t := new(tabwriter.Writer)
 	b := new(bytes.Buffer)
 
@@ -1136,10 +1176,10 @@ func listJumps(jumps []string, ind int) *bytes.Buffer {
 	}
 	t.Flush()
 
-	return b
+	return b.String()
 }
 
-func listHistory(history []cmdItem) *bytes.Buffer {
+func listHistory(history []cmdItem) string {
 	t := new(tabwriter.Writer)
 	b := new(bytes.Buffer)
 
@@ -1152,14 +1192,14 @@ func listHistory(history []cmdItem) *bytes.Buffer {
 	}
 	t.Flush()
 
-	return b
+	return b.String()
 }
 
-func listMarks(marks map[string]string) *bytes.Buffer {
+func listMarks(marks map[string]string) string {
 	t := new(tabwriter.Writer)
 	b := new(bytes.Buffer)
 
-	var keys []string
+	keys := make([]string, 0, len(marks))
 	for k := range marks {
 		keys = append(keys, k)
 	}
@@ -1172,7 +1212,25 @@ func listMarks(marks map[string]string) *bytes.Buffer {
 	}
 	t.Flush()
 
-	return b
+	return b.String()
+}
+
+func listFilesInCurrDir(nav *nav) string {
+	if !nav.init {
+		return ""
+	}
+	dir := nav.currDir()
+	if dir.loading {
+		log.Printf("listFilesInCurrDir(): %s is still loading, `files` isn't ready for remote query", dir.path)
+		return ""
+	}
+
+	b := new(strings.Builder)
+	for _, file := range dir.files {
+		fmt.Fprintln(b, file.path)
+	}
+
+	return b.String()
 }
 
 func (ui *ui) pollEvent() tcell.Event {
@@ -1268,10 +1326,10 @@ func (ui *ui) readNormalEvent(ev tcell.Event, nav *nav) expr {
 		} else {
 			val := gKeyVal[tev.Key()]
 			val = addSpecialKeyModifier(val, tev.Modifiers())
-			if val == "<esc>" && string(ui.keyAcc) != "" {
+			if val == "<esc>" && len(ui.keyAcc) != 0 {
 				ui.keyAcc = nil
 				ui.keyCount = nil
-				ui.menuBuf = nil
+				ui.menu = ""
 				return draw
 			}
 			ui.keyAcc = append(ui.keyAcc, []rune(val)...)
@@ -1288,7 +1346,7 @@ func (ui *ui) readNormalEvent(ev tcell.Event, nav *nav) expr {
 			ui.echoerrf("unknown mapping: %s", string(ui.keyAcc))
 			ui.keyAcc = nil
 			ui.keyCount = nil
-			ui.menuBuf = nil
+			ui.menu = ""
 			return draw
 		default:
 			if ok {
@@ -1301,20 +1359,23 @@ func (ui *ui) readNormalEvent(ev tcell.Event, nav *nav) expr {
 				}
 				expr := gOpts.keys[string(ui.keyAcc)]
 
-				if e, ok := expr.(*callExpr); ok && count != 0 {
-					expr = &callExpr{e.name, e.args, e.count}
-					expr.(*callExpr).count = count
-				} else if e, ok := expr.(*listExpr); ok && count != 0 {
-					expr = &listExpr{e.exprs, e.count}
-					expr.(*listExpr).count = count
+				if count != 0 {
+					switch e := expr.(type) {
+					case *callExpr:
+						expr = &callExpr{name: e.name, args: e.args, count: count}
+					case *listExpr:
+						expr = &listExpr{exprs: e.exprs, count: count}
+					}
 				}
 
 				ui.keyAcc = nil
 				ui.keyCount = nil
-				ui.menuBuf = nil
+				ui.menu = ""
 				return expr
 			}
-			ui.menuBuf = listBinds(binds)
+			if gOpts.showbinds {
+				ui.menu = listBinds(binds)
+			}
 			return draw
 		}
 	case *tcell.EventMouse:
@@ -1362,7 +1423,7 @@ func (ui *ui) readNormalEvent(ev tcell.Event, nav *nav) expr {
 			ui.echoerrf("unknown mapping: %s", button)
 			ui.keyAcc = nil
 			ui.keyCount = nil
-			ui.menuBuf = nil
+			ui.menu = ""
 			return draw
 		}
 
@@ -1471,6 +1532,7 @@ func (ui *ui) readExpr() {
 }
 
 func (ui *ui) suspend() error {
+	ui.sxScreen.forceClear = true
 	return ui.screen.Suspend()
 }
 
@@ -1535,15 +1597,17 @@ func anyKey() {
 	}
 	defer term.Restore(int(os.Stdin.Fd()), oldState)
 
-	b := make([]byte, 1)
+	b := make([]byte, 8)
 	os.Stdin.Read(b)
 }
 
-func listMatches(screen tcell.Screen, matches []string, selectedInd int) *bytes.Buffer {
-	if len(matches) < 2 {
-		return nil
+func listMatches(screen tcell.Screen, matches []string, selectedInd int) string {
+	mlen := len(matches)
+	if mlen < 2 {
+		return ""
 	}
-	b := new(bytes.Buffer)
+
+	var b strings.Builder
 
 	wtot, _ := screen.Size()
 	wcol := 0
@@ -1555,19 +1619,18 @@ func listMatches(screen tcell.Screen, matches []string, selectedInd int) *bytes.
 
 	b.WriteString("possible matches\n")
 
-	for i := 0; i < len(matches); {
-		for j := 0; j < ncol && i < len(matches); i, j = i+1, j+1 {
+	for i := 0; i < mlen; {
+		for j := 0; j < ncol && i < mlen; i, j = i+1, j+1 {
 			target := matches[i]
 
 			if selectedInd == i {
-				target = fmt.Sprintf("\033[7m%s\033[0m%*s", target, wcol-len(target), "")
+				fmt.Fprintf(&b, "\033[7m%s\033[0m%*s", target, wcol-len(target), "")
 			} else {
-				target = fmt.Sprintf("%s%*s", target, wcol-len(target), "")
+				fmt.Fprintf(&b, "%s%*s", target, wcol-len(target), "")
 			}
-			b.WriteString(target)
 		}
 		b.WriteByte('\n')
 	}
 
-	return b
+	return b.String()
 }

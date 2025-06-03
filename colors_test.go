@@ -6,6 +6,35 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
+func TestParseColor(t *testing.T) {
+	tests := []struct {
+		toks    []string
+		color   tcell.Color
+		offset  int
+		success bool
+	}{
+		{[]string{}, tcell.ColorDefault, 0, false},
+		{[]string{"foo"}, tcell.ColorDefault, 0, false},
+		{[]string{"5"}, tcell.ColorDefault, 0, false},
+		{[]string{"5", "foo"}, tcell.ColorDefault, 0, false},
+		{[]string{"5", "42"}, tcell.PaletteColor(42), 2, true},
+		{[]string{"2"}, tcell.ColorDefault, 0, false},
+		{[]string{"2", "foo"}, tcell.ColorDefault, 0, false},
+		{[]string{"2", "42", "foo"}, tcell.ColorDefault, 0, false},
+		{[]string{"2", "42", "43", "foo"}, tcell.ColorDefault, 0, false},
+		{[]string{"2", "42", "43", "44"}, tcell.NewRGBColor(42, 43, 44), 4, true},
+	}
+
+	for _, test := range tests {
+		color, offset, err := parseColor(test.toks)
+		success := err == nil
+		if color != test.color || offset != test.offset || success != test.success {
+			t.Errorf("at input %v expected (%v, %v, %v) but got (%v, %v, %v)",
+				test.toks, test.color, test.offset, test.success, color, offset, success)
+		}
+	}
+}
+
 func TestApplyAnsiCodes(t *testing.T) {
 	none := tcell.StyleDefault
 
@@ -35,6 +64,14 @@ func TestApplyAnsiCodes(t *testing.T) {
 		{"4", none.Bold(true), none.Bold(true).Underline(true)},
 		{"4", none.Foreground(tcell.ColorMaroon).Bold(true), none.Foreground(tcell.ColorMaroon).Bold(true).Underline(true)},
 
+		{"4:0", none, none},
+		{"4:0", none.Underline(true), none},
+		{"4:1", none, none.Underline(true)},
+		{"4:2", none, none.Underline(tcell.UnderlineStyleDouble)},
+		{"4:3", none, none.Underline(tcell.UnderlineStyleCurly)},
+		{"4:4", none, none.Underline(tcell.UnderlineStyleDotted)},
+		{"4:5", none, none.Underline(tcell.UnderlineStyleDashed)},
+
 		{"31", none, none.Foreground(tcell.ColorMaroon)},
 		{"31", none.Foreground(tcell.ColorGreen), none.Foreground(tcell.ColorMaroon)},
 		{"31", none.Foreground(tcell.ColorGreen).Bold(true), none.Foreground(tcell.ColorMaroon).Bold(true)},
@@ -44,6 +81,9 @@ func TestApplyAnsiCodes(t *testing.T) {
 
 		{"1;31", none, none.Foreground(tcell.ColorMaroon).Bold(true)},
 		{"1;31", none.Foreground(tcell.ColorGreen), none.Foreground(tcell.ColorMaroon).Bold(true)},
+
+		{"01;31", none, none.Foreground(tcell.ColorMaroon).Bold(true)},
+		{"01;31", none.Foreground(tcell.ColorGreen), none.Foreground(tcell.ColorMaroon).Bold(true)},
 
 		{"38;5;0", none, none.Foreground(tcell.ColorBlack)},
 		{"38;5;1", none, none.Foreground(tcell.ColorMaroon)},

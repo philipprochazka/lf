@@ -10,12 +10,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/djherbis/times"
+	"golang.org/x/text/collate"
 )
 
 type linkState byte
@@ -87,7 +89,7 @@ func newFile(path string) *file {
 	}
 
 	dirCount := -1
-	if lstat.IsDir() && gOpts.dircounts {
+	if lstat.IsDir() && getDirCounts(filepath.Dir(path)) {
 		d, err := os.Open(path)
 		if err != nil {
 			dirCount = -2
@@ -171,8 +173,8 @@ type dir struct {
 	filter      []string   // last filter for this directory
 	ignorecase  bool       // ignorecase value from last sort
 	ignoredia   bool       // ignoredia value from last sort
+	locale      string     // locale value from last sort
 	noPerm      bool       // whether lf has no permission to open the directory
-	lines       []string   // lines of text to display if directory previews are enabled
 }
 
 func newDir(path string) *dir {
@@ -184,7 +186,6 @@ func newDir(path string) *dir {
 	}
 
 	return &dir{
-		loading:  gOpts.dirpreviews, // Directory is loaded after previewer function exits.
 		loadTime: time,
 		path:     path,
 		files:    files,
@@ -211,6 +212,7 @@ func (dir *dir) sort() {
 	dir.dironly = getDirOnly(dir.path)
 	dir.hidden = getHidden(dir.path)
 	dir.reverse = getReverse(dir.path)
+	dir.locale = getLocale(dir.path)
 	dir.hiddenfiles = gOpts.hiddenfiles
 	dir.ignorecase = gOpts.ignorecase
 	dir.ignoredia = gOpts.ignoredia
@@ -221,23 +223,47 @@ func (dir *dir) sort() {
 	// of equivalent elements will be reversed
 	switch dir.sortby {
 	case naturalSort:
-		sort.SliceStable(dir.files, func(i, j int) bool {
-			s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
-			if !dir.reverse {
-				return naturalLess(s1, s2)
-			} else {
-				return naturalLess(s2, s1)
-			}
-		})
+		if collator, err := makeCollator(dir.locale, collate.Numeric); err == nil {
+			sort.SliceStable(dir.files, func(i, j int) bool {
+				s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
+				result := collator.CompareString(s1, s2)
+				if !dir.reverse {
+					return result < 0
+				} else {
+					return result > 0
+				}
+			})
+		} else {
+			sort.SliceStable(dir.files, func(i, j int) bool {
+				s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
+				if !dir.reverse {
+					return naturalLess(s1, s2)
+				} else {
+					return naturalLess(s2, s1)
+				}
+			})
+		}
 	case nameSort:
-		sort.SliceStable(dir.files, func(i, j int) bool {
-			s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
-			if !dir.reverse {
-				return s1 < s2
-			} else {
-				return s2 < s1
-			}
-		})
+		if collator, err := makeCollator(dir.locale); err == nil {
+			sort.SliceStable(dir.files, func(i, j int) bool {
+				s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
+				result := collator.CompareString(s1, s2)
+				if !dir.reverse {
+					return result < 0
+				} else {
+					return result > 0
+				}
+			})
+		} else {
+			sort.SliceStable(dir.files, func(i, j int) bool {
+				s1, s2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
+				if !dir.reverse {
+					return s1 < s2
+				} else {
+					return s2 < s1
+				}
+			})
+		}
 	case sizeSort:
 		sort.SliceStable(dir.files, func(i, j int) bool {
 			if !dir.reverse {
@@ -273,20 +299,7 @@ func (dir *dir) sort() {
 	case extSort:
 		sort.SliceStable(dir.files, func(i, j int) bool {
 			ext1, ext2 := normalize(dir.files[i].ext, dir.files[j].ext, dir.ignorecase, dir.ignoredia)
-
-			// if the extension could not be determined (directories, files without)
-			// use a zero byte so that these files can be ranked higher
-			if ext1 == "" {
-				ext1 = "\x00"
-			}
-			if ext2 == "" {
-				ext2 = "\x00"
-			}
-
 			name1, name2 := normalize(dir.files[i].Name(), dir.files[j].Name(), dir.ignorecase, dir.ignoredia)
-
-			// in order to also have natural sorting with the filenames
-			// combine the name with the ext but have the ext at the front
 			if !dir.reverse {
 				return ext1 < ext2 || ext1 == ext2 && name1 < name2
 			} else {
@@ -435,7 +448,6 @@ type nav struct {
 	deleteCountChan chan int
 	deleteTotalChan chan int
 	previewChan     chan string
-	dirPreviewChan  chan *dir
 	dirChan         chan *dir
 	regChan         chan *reg
 	fileChan        chan *file
@@ -465,8 +477,6 @@ type nav struct {
 }
 
 func (nav *nav) loadDirInternal(path string) *dir {
-	nav.startPreview()
-
 	d := &dir{
 		loading:     true,
 		loadTime:    time.Now(),
@@ -476,6 +486,7 @@ func (nav *nav) loadDirInternal(path string) *dir {
 		dironly:     getDirOnly(path),
 		hidden:      getHidden(path),
 		reverse:     getReverse(path),
+		locale:      getLocale(path),
 		hiddenfiles: gOpts.hiddenfiles,
 		ignorecase:  gOpts.ignorecase,
 		ignoredia:   gOpts.ignoredia,
@@ -484,9 +495,6 @@ func (nav *nav) loadDirInternal(path string) *dir {
 		d := newDir(path)
 		d.sort()
 		d.ind, d.pos = 0, 0
-		if gOpts.dirpreviews {
-			nav.dirPreviewChan <- d
-		}
 		nav.dirChan <- d
 	}()
 	return d
@@ -525,14 +533,10 @@ func (nav *nav) checkDir(dir *dir) {
 			return
 		}
 
-		nav.startPreview()
 		dir.loading = true
 		dir.loadTime = now
 		go func() {
 			nd := newDir(dir.path)
-			if gOpts.dirpreviews {
-				nav.dirPreviewChan <- nd
-			}
 			nav.dirChan <- nd
 		}()
 	case dir.sortby != getSortBy(dir.path) ||
@@ -540,6 +544,7 @@ func (nav *nav) checkDir(dir *dir) {
 		dir.dironly != getDirOnly(dir.path) ||
 		dir.hidden != getHidden(dir.path) ||
 		dir.reverse != getReverse(dir.path) ||
+		dir.locale != getLocale(dir.path) ||
 		!reflect.DeepEqual(dir.hiddenfiles, gOpts.hiddenfiles) ||
 		dir.ignorecase != gOpts.ignorecase ||
 		dir.ignoredia != gOpts.ignoredia:
@@ -582,7 +587,6 @@ func newNav(height int) *nav {
 		deleteCountChan: make(chan int, 1024),
 		deleteTotalChan: make(chan int, 1024),
 		previewChan:     make(chan string, 1024),
-		dirPreviewChan:  make(chan *dir, 1024),
 		dirChan:         make(chan *dir),
 		regChan:         make(chan *reg),
 		fileChan:        make(chan *file),
@@ -649,8 +653,8 @@ func (nav *nav) renew() {
 }
 
 func (nav *nav) reload() error {
-	nav.dirCache = make(map[string]*dir)
-	nav.regCache = make(map[string]*reg)
+	clear(nav.dirCache)
+	clear(nav.regCache)
 
 	curr, err := nav.currFile()
 	nav.getDirs(nav.currDir().path)
@@ -701,23 +705,6 @@ func (nav *nav) exportFiles() {
 	}
 }
 
-func (nav *nav) dirPreviewLoop(ui *ui) {
-	var prevPath string
-	for dir := range nav.dirPreviewChan {
-		if dir == nil && len(gOpts.previewer) != 0 && len(gOpts.cleaner) != 0 && nav.volatilePreview {
-			cmd := exec.Command(gOpts.cleaner, prevPath)
-			if err := cmd.Run(); err != nil {
-				log.Printf("cleaning preview: %s", err)
-			}
-			nav.volatilePreview = false
-		} else if dir != nil {
-			win := ui.wins[len(ui.wins)-1]
-			nav.previewDir(dir, win)
-			prevPath = dir.path
-		}
-	}
-}
-
 func (nav *nav) previewLoop(ui *ui) {
 	var prev string
 	for path := range nav.previewChan {
@@ -764,64 +751,6 @@ func matchPattern(pattern, name, path string) bool {
 	matched, _ := filepath.Match(pattern, s)
 
 	return matched
-}
-
-func (nav *nav) previewDir(dir *dir, win *win) {
-	defer func() {
-		dir.loading = false
-		nav.dirChan <- dir
-	}()
-
-	var reader io.Reader
-
-	if len(gOpts.previewer) != 0 {
-		cmd := exec.Command(gOpts.previewer, dir.path,
-			strconv.Itoa(win.w),
-			strconv.Itoa(win.h),
-			strconv.Itoa(win.x),
-			strconv.Itoa(win.y))
-
-		out, err := cmd.StdoutPipe()
-		if err != nil {
-			log.Printf("previewing dir: %s", err)
-			return
-		}
-
-		if err := cmd.Start(); err != nil {
-			log.Printf("previewing dir: %s", err)
-			out.Close()
-			return
-		}
-
-		defer func() {
-			if err := cmd.Wait(); err != nil {
-				if e, ok := err.(*exec.ExitError); ok {
-					if e.ExitCode() != 0 {
-						nav.volatilePreview = true
-					}
-				} else {
-					log.Printf("loading dir: %s", err)
-				}
-			}
-		}()
-		defer out.Close()
-		reader = out
-		buf := bufio.NewScanner(reader)
-
-		for i := 0; i < win.h && buf.Scan(); i++ {
-			for _, r := range buf.Text() {
-				if r == 0 {
-					dir.lines = []string{"\033[7mbinary\033[0m"}
-					return
-				}
-			}
-			dir.lines = append(dir.lines, buf.Text())
-		}
-
-		if buf.Err() != nil {
-			log.Printf("loading dir: %s", buf.Err())
-		}
-	}
 }
 
 func (nav *nav) preview(path string, win *win) {
@@ -899,11 +828,9 @@ func (nav *nav) preview(path string, win *win) {
 			break
 		}
 
-		for _, byte := range bytes {
-			if byte == 0 {
-				reg.lines = []string{"\033[7mbinary\033[0m"}
-				return
-			}
+		if slices.Contains(bytes, 0) {
+			reg.lines = []string{"\033[7mbinary\033[0m"}
+			return
 		}
 
 		line = append(line, bytes...)
@@ -1139,7 +1066,7 @@ func (nav *nav) bottom() bool {
 
 	old := dir.ind
 
-	dir.ind = len(dir.files) - 1
+	dir.ind = max(len(dir.files)-1, 0)
 	dir.pos = min(dir.ind, nav.height-1)
 
 	return old != dir.ind
@@ -1234,6 +1161,8 @@ func (nav *nav) toggle() {
 }
 
 func (nav *nav) tagToggleSelection(path string, tag string) {
+	path = evalSymlinks(path)
+
 	if _, ok := nav.tags[path]; ok {
 		delete(nav.tags, path)
 	} else {
@@ -1269,7 +1198,7 @@ func (nav *nav) tag(tag string) error {
 	}
 
 	for _, path := range list {
-		nav.tags[path] = tag
+		nav.tags[evalSymlinks(path)] = tag
 	}
 
 	return nil
@@ -1292,7 +1221,7 @@ func (nav *nav) invertBelow() {
 }
 
 func (nav *nav) unselect() {
-	nav.selections = make(map[string]int)
+	clear(nav.selections)
 	nav.selectionInd = 0
 }
 
@@ -1306,7 +1235,7 @@ func (nav *nav) save(cp bool) error {
 		return err
 	}
 
-	nav.saves = make(map[string]bool)
+	clear(nav.saves)
 	for _, f := range list {
 		nav.saves[f] = cp
 	}
@@ -1584,20 +1513,25 @@ func (nav *nav) sync() error {
 		return err
 	}
 
-	nav.saves = make(map[string]bool)
+	clear(nav.saves)
 	for _, f := range list {
 		nav.saves[f] = cp
 	}
 
-	oldmarks := nav.marks
-	errMarks := nav.readMarks()
+	tempmarks := make(map[string]string)
 	for _, ch := range gOpts.tempmarks {
-		tmp := string(ch)
-		if v, e := oldmarks[tmp]; e {
-			nav.marks[tmp] = v
+		k := string(ch)
+		if v, ok := nav.marks[k]; ok {
+			tempmarks[k] = v
 		}
 	}
+	errMarks := nav.readMarks()
+	for k, v := range tempmarks {
+		nav.marks[k] = v
+	}
+
 	err = nav.readTags()
+
 	if errMarks != nil {
 		return errMarks
 	}
@@ -1658,7 +1592,7 @@ func (nav *nav) globSel(pattern string, invert bool) error {
 	dir := nav.currDir()
 	anyMatched := false
 
-	for i := 0; i < len(dir.files); i++ {
+	for i := range dir.files {
 		matched, err := filepath.Match(pattern, dir.files[i].Name())
 		if err != nil {
 			return fmt.Errorf("glob-select: %s", err)
@@ -1704,7 +1638,7 @@ func (nav *nav) findSingle() int {
 	count := 0
 	index := 0
 	dir := nav.currDir()
-	for i := 0; i < len(dir.files); i++ {
+	for i := range dir.files {
 		if findMatch(dir.files[i].Name(), nav.find) {
 			count++
 			if count > 1 {
@@ -1731,7 +1665,7 @@ func (nav *nav) findNext() (bool, bool) {
 		}
 	}
 	if gOpts.wrapscan {
-		for i := 0; i < dir.ind; i++ {
+		for i := range dir.ind {
 			if findMatch(dir.files[i].Name(), nav.find) {
 				return nav.up(dir.ind - i), true
 			}
@@ -1788,7 +1722,7 @@ func (nav *nav) searchNext() (bool, error) {
 		}
 	}
 	if gOpts.wrapscan {
-		for i := 0; i < dir.ind; i++ {
+		for i := range dir.ind {
 			if matched, err := searchMatch(dir.files[i].Name(), nav.search, gOpts.globsearch); err != nil {
 				return false, err
 			} else if matched {
@@ -1845,7 +1779,7 @@ func (nav *nav) removeMark(mark string) error {
 }
 
 func (nav *nav) readMarks() error {
-	nav.marks = make(map[string]string)
+	clear(nav.marks)
 	f, err := os.Open(gMarksPath)
 	if os.IsNotExist(err) {
 		return nil
@@ -1903,7 +1837,7 @@ func (nav *nav) writeMarks() error {
 }
 
 func (nav *nav) readTags() error {
-	nav.tags = make(map[string]string)
+	clear(nav.tags)
 	f, err := os.Open(gTagsPath)
 	if os.IsNotExist(err) {
 		return nil

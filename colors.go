@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -95,85 +96,121 @@ func parseEscapeSequence(s string) tcell.Style {
 	return applyAnsiCodes(s, tcell.StyleDefault)
 }
 
+func parseColor(toks []string) (tcell.Color, int, error) {
+	if len(toks) == 0 {
+		return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+	}
+
+	if toks[0] == "5" && len(toks) >= 2 {
+		n, err := strconv.Atoi(toks[1])
+		if err != nil {
+			return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+		}
+
+		return tcell.PaletteColor(n), 2, nil
+	}
+
+	if toks[0] == "2" && len(toks) >= 4 {
+		r, err := strconv.Atoi(toks[1])
+		if err != nil {
+			return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+		}
+
+		g, err := strconv.Atoi(toks[2])
+		if err != nil {
+			return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+		}
+
+		b, err := strconv.Atoi(toks[3])
+		if err != nil {
+			return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+		}
+
+		return tcell.NewRGBColor(int32(r), int32(g), int32(b)), 4, nil
+	}
+
+	return tcell.ColorDefault, 0, fmt.Errorf("invalid args: %v", toks)
+}
+
 func applyAnsiCodes(s string, st tcell.Style) tcell.Style {
 	toks := strings.Split(s, ";")
-
-	var nums []int
-	for _, tok := range toks {
-		if tok == "" {
-			nums = append(nums, 0)
-			continue
-		}
-		n, err := strconv.Atoi(tok)
-		if err != nil {
-			log.Printf("converting escape code: %s", err)
-			continue
-		}
-		nums = append(nums, n)
-	}
 
 	// ECMA-48 details the standard
 	// TODO: should we support turning off attributes?
 	//    Probably because this is used for previewers too
-	for i := 0; i < len(nums); i++ {
-		n := nums[i]
-		switch {
-		case n == 0:
+	tokslen := len(toks)
+
+loop:
+	for i := 0; i < tokslen; i++ {
+		switch strings.TrimLeft(toks[i], "0") {
+		case "":
 			st = tcell.StyleDefault
-		case n == 1:
+		case "1":
 			st = st.Bold(true)
-		case n == 2:
+		case "2":
 			st = st.Dim(true)
-		case n == 3:
+		case "3":
 			st = st.Italic(true)
-		case n == 4:
+		case "4:0":
+			st = st.Underline(false)
+		case "4", "4:1":
 			st = st.Underline(true)
-		case n == 5 || n == 6:
+		case "4:2":
+			st = st.Underline(tcell.UnderlineStyleDouble)
+		case "4:3":
+			st = st.Underline(tcell.UnderlineStyleCurly)
+		case "4:4":
+			st = st.Underline(tcell.UnderlineStyleDotted)
+		case "4:5":
+			st = st.Underline(tcell.UnderlineStyleDashed)
+		case "5", "6":
 			st = st.Blink(true)
-		case n == 7:
+		case "7":
 			st = st.Reverse(true)
-		case n == 8:
+		case "8":
 			// TODO: tcell PR for proper conceal
 			_, bg, _ := st.Decompose()
 			st = st.Foreground(bg)
-		case n == 9:
+		case "9":
 			st = st.StrikeThrough(true)
-		case n >= 30 && n <= 37:
+		case "30", "31", "32", "33", "34", "35", "36", "37":
+			n, _ := strconv.Atoi(toks[i])
 			st = st.Foreground(tcell.PaletteColor(n - 30))
-		case n >= 90 && n <= 97:
+		case "90", "91", "92", "93", "94", "95", "96", "97":
+			n, _ := strconv.Atoi(toks[i])
 			st = st.Foreground(tcell.PaletteColor(n - 82))
-		case n == 38:
-			if i+3 <= len(nums) && nums[i+1] == 5 {
-				st = st.Foreground(tcell.PaletteColor(nums[i+2]))
-				i += 2
-			} else if i+5 <= len(nums) && nums[i+1] == 2 {
-				st = st.Foreground(tcell.NewRGBColor(
-					int32(nums[i+2]),
-					int32(nums[i+3]),
-					int32(nums[i+4])))
-				i += 4
-			} else {
-				log.Printf("unknown ansi code or incorrect form: %d", n)
+		case "38":
+			color, offset, err := parseColor(toks[i+1:])
+			if err != nil {
+				log.Printf("error processing ansi code 38: %s", err)
+				break loop
 			}
-		case n >= 40 && n <= 47:
+			st = st.Foreground(color)
+			i += offset
+		case "40", "41", "42", "43", "44", "45", "46", "47":
+			n, _ := strconv.Atoi(toks[i])
 			st = st.Background(tcell.PaletteColor(n - 40))
-		case n >= 100 && n <= 107:
+		case "100", "101", "102", "103", "104", "105", "106", "107":
+			n, _ := strconv.Atoi(toks[i])
 			st = st.Background(tcell.PaletteColor(n - 92))
-		case n == 48:
-			if i+3 <= len(nums) && nums[i+1] == 5 {
-				st = st.Background(tcell.PaletteColor(nums[i+2]))
-				i += 2
-			} else if i+5 <= len(nums) && nums[i+1] == 2 {
-				st = st.Background(tcell.NewRGBColor(
-					int32(nums[i+2]),
-					int32(nums[i+3]),
-					int32(nums[i+4])))
-				i += 4
-			} else {
-				log.Printf("unknown ansi code or incorrect form: %d", n)
+		case "48":
+			color, offset, err := parseColor(toks[i+1:])
+			if err != nil {
+				log.Printf("error processing ansi code 48: %s", err)
+				break loop
 			}
+			st = st.Background(color)
+			i += offset
+		case "58":
+			color, offset, err := parseColor(toks[i+1:])
+			if err != nil {
+				log.Printf("error processing ansi code 58: %s", err)
+				break loop
+			}
+			st = st.Underline(color)
+			i += offset
 		default:
-			log.Printf("unknown ansi code: %d", n)
+			log.Printf("unknown ansi code: %s", toks[i])
 		}
 	}
 
